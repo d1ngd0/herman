@@ -1,12 +1,10 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        mpsc::{self, Receiver, SyncSender},
-        RwLock,
-    },
-};
+use std::collections::HashMap;
 
-use crate::Dapt;
+use dapt::Dapt;
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender},
+    RwLock,
+};
 
 // Router is a collection of namespaces which allows for registering
 // channels to read and write to namespace. Namespaces are created
@@ -25,7 +23,7 @@ pub struct Router {
 // can be set on the registers themselves.
 pub struct Namespace {
     inputs: RwLock<HashMap<String, Receiver<Dapt>>>,
-    outputs: RwLock<HashMap<String, SyncSender<Dapt>>>,
+    outputs: RwLock<HashMap<String, Sender<Dapt>>>,
 }
 
 impl Namespace {
@@ -36,16 +34,22 @@ impl Namespace {
         }
     }
 
-    pub fn input(&mut self, name: String, buffer: usize) -> SyncSender<Dapt> {
-        let (send, recv) = mpsc::sync_channel(buffer);
-        self.inputs.write().unwrap().insert(name, recv);
+    pub async fn input(&mut self, name: String, buffer: usize) -> Sender<Dapt> {
+        let (send, recv) = channel(buffer);
+        self.inputs.write().await.insert(name, recv);
         send
     }
 
-    pub fn output(&mut self, name: String, buffer: usize) -> Receiver<Dapt> {
-        let (send, recv) = mpsc::sync_channel(buffer);
-        self.outputs.write().unwrap().insert(name, send);
+    pub async fn output(&mut self, name: String, buffer: usize) -> Receiver<Dapt> {
+        let (send, recv) = channel(buffer);
+        self.outputs.write().await.insert(name, send);
         recv
+    }
+}
+
+impl Drop for Namespace {
+    fn drop(&mut self) {
+        // Clean up the namespace
     }
 }
 
