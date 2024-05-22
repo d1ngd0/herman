@@ -265,6 +265,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "dapt",
+ "serde",
  "serde_json",
  "tokio",
 ]
