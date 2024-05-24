@@ -1,4 +1,5 @@
 mod ledger;
+mod memberlist;
 
 use std::{future::Future, sync::Arc};
 

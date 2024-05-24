@@ -4,6 +4,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Serialize;
+
 // Key is a trait that we use to define the key type for the Ledger.
 pub trait Key: Eq + Clone + Hash {}
 impl<T: Eq + Clone + Hash> Key for T {}
@@ -135,7 +137,7 @@ impl<T: Key, D: Data> Ledger<T, D> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub enum Entry<T: Key, D: Data> {
     Put(EntryMeta<T>, D),
     Delete(EntryMeta<T>),
@@ -151,7 +153,7 @@ impl<T: Key, D: Data> PartialEq for Entry<T, D> {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, Serialize)]
 pub struct EntryMeta<T: Key> {
     key: T,
     at: u128,
