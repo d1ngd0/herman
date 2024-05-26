@@ -1,14 +1,25 @@
 use std::{
     future::Future,
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
+    sync::Arc,
 };
 
-use memberlist::{net::Transport, Memberlist};
-use serde::Serialize;
+use memberlist::{
+    bytes::Bytes,
+    delegate::{
+        AliveDelegate, ConflictDelegate, Delegate, EventDelegate, MergeDelegate, NodeDelegate,
+        PingDelegate, VoidDelegateError,
+    },
+    net::{AddressResolver, Id, Transport},
+    types::{Meta, NodeState, SmallVec, TinyVec},
+    CheapClone, Memberlist,
+};
+use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::{
     ledger::{Data, Entry, Key},
-    Broadcast,
+    Broadcast, Subscribe,
 };
 
 /// The broadcaster implements transporting data using memberlists send_reliable mode. It
@@ -23,12 +34,19 @@ use super::{
 ///
 /// So I guess use with caution.
 pub struct Broadcaster<T: Transport> {
-    memberlist: Memberlist<T>,
+    memberlist:
+        Memberlist<T, HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     num_friends: usize,
 }
 
 impl<T: Transport> Broadcaster<T> {
-    pub fn new(memberlist: Memberlist<T>, num_friends: usize) -> Self {
+    pub fn new(
+        memberlist: Memberlist<
+            T,
+            HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+        >,
+        num_friends: usize,
+    ) -> Self {
         Self {
             memberlist,
             num_friends,
@@ -96,11 +114,180 @@ impl<T: Transport, K: Key + Serialize, D: Data + Serialize> Broadcast<K, D> for 
                             id = %self.memberlist.local_id(),
                             peer_addr = %member,
                             err = %e,
-                            "memberlist.broadcast: failed to send packet"
+                            "memberlist.broadcast: failed to sen packet"
                         );
                     }
                 };
             }
         }
     }
+}
+
+pub trait WithCCFG<T: Transport> {
+    fn with_ccfg<T: Transport>() -> Broadcaster<T>;
+}
+
+pub struct Subscriber {
+    messages: Receiver<Bytes>,
+}
+
+impl Subscriber {
+    pub fn new(messages: Receiver<Bytes>) -> Self {
+        Self { messages }
+    }
+}
+
+pub struct HermanDelegate<K: Id, A: CheapClone + Send + Sync + 'static> {
+    phantom: std::marker::PhantomData<(K, A)>,
+    messages: Option<Sender<Bytes>>,
+}
+
+impl<T: Key + DeserializeOwned, D: Data + DeserializeOwned> Subscribe<T, D> for Subscriber {
+    async fn watch(&mut self) -> Entry<T, D> {
+        loop {
+            match self.messages.recv().await {
+                Some(msg) => {
+                    let msg = serde_cbor::from_slice::<Entry<T, D>>(&msg);
+                    match msg {
+                        Ok(entry) => {
+                            return entry;
+                        }
+                        Err(e) => {
+                            tracing::error!(err = %e, "failed to deserialize message");
+                        }
+                    }
+                }
+                None => {
+                    tracing::error!("failed to receive message");
+                }
+            }
+        }
+    }
+}
+
+impl<K: Id, A: CheapClone + Send + Sync + 'static> HermanDelegate<K, A> {
+    pub fn new() -> Self {
+        Self {
+            phantom: std::marker::PhantomData,
+            messages: None,
+        }
+    }
+
+    pub fn with_messages(messages: Sender<Bytes>) -> Self {
+        Self {
+            phantom: std::marker::PhantomData,
+            messages: Some(messages),
+        }
+    }
+
+    pub fn set_messages(&mut self, messages: Sender<Bytes>) {
+        self.messages = Some(messages);
+    }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> AliveDelegate for HermanDelegate<I, A> {
+    type Error = VoidDelegateError;
+    type Id = I;
+    type Address = A;
+
+    async fn notify_alive(
+        &self,
+        _peer: Arc<NodeState<Self::Id, Self::Address>>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> MergeDelegate for HermanDelegate<I, A> {
+    type Error = VoidDelegateError;
+    type Id = I;
+    type Address = A;
+
+    async fn notify_merge(
+        &self,
+        _peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> ConflictDelegate for HermanDelegate<I, A> {
+    type Id = I;
+    type Address = A;
+
+    async fn notify_conflict(
+        &self,
+        _existing: Arc<NodeState<Self::Id, Self::Address>>,
+        _other: Arc<NodeState<Self::Id, Self::Address>>,
+    ) {
+    }
+}
+
+impl<K: Id, A: CheapClone + Send + Sync + 'static> PingDelegate for HermanDelegate<K, A> {
+    type Id = K;
+    type Address = A;
+
+    async fn ack_payload(&self) -> Bytes {
+        Bytes::new()
+    }
+
+    async fn notify_ping_complete(
+        &self,
+        _node: Arc<NodeState<Self::Id, Self::Address>>,
+        _rtt: std::time::Duration,
+        _payload: Bytes,
+    ) {
+    }
+
+    fn disable_promised_pings(&self, _target: &Self::Id) -> bool {
+        false
+    }
+}
+
+impl<K: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for HermanDelegate<K, A> {
+    async fn node_meta(&self, _limit: usize) -> Meta {
+        Meta::empty()
+    }
+
+    async fn notify_message(&self, msg: Bytes) {
+        // we can't really do anything if it doesn't work, so
+        // we don't care about the answer, fire and forget.
+        if let Some(messages) = &self.messages.as_ref() {
+            let _ = messages.send(msg).await;
+        }
+    }
+
+    async fn broadcast_messages<F>(
+        &self,
+        _overhead: usize,
+        _limit: usize,
+        _encoded_len: F,
+    ) -> TinyVec<Bytes>
+    where
+        F: Fn(Bytes) -> (usize, Bytes) + Send,
+    {
+        TinyVec::new()
+    }
+
+    async fn local_state(&self, _join: bool) -> Bytes {
+        Bytes::new()
+    }
+
+    async fn merge_remote_state(&self, _buf: Bytes, _join: bool) {}
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for HermanDelegate<I, A> {
+    type Id = I;
+    type Address = A;
+
+    async fn notify_join(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+
+    async fn notify_leave(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+
+    async fn notify_update(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+}
+
+impl<K: Id, A: CheapClone + Send + Sync + 'static> Delegate for HermanDelegate<K, A> {
+    type Id = K;
+    type Address = A;
 }

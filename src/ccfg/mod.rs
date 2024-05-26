@@ -3,10 +3,21 @@ mod memberlist;
 
 use std::{future::Future, sync::Arc};
 
+use ::memberlist::{
+    delegate::Delegate,
+    net::{AddressResolver, Transport},
+    transport, Memberlist,
+};
 use ledger::Ledger;
-use tokio::sync::Mutex;
+use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
-use self::ledger::{Data, Entry, Key};
+use self::{
+    ledger::{Data, Entry, Key},
+    memberlist::{Broadcaster, Subscriber},
+};
+
+pub use self::memberlist::{Broadcast, HermanDelegate, Subscribe};
 
 /// Broadcase is used to send data to multiple nodes on the network. It is up to
 /// the implementor how this should be done. send_entry is used to send a single entry
@@ -18,10 +29,10 @@ pub trait Broadcast<T: Key, D: Data> {
     // TODO: We will likely need an error from this
 }
 
-/// Subscriber is used to watch for incoming changes. It is the partner of the Broadcast
+/// Subscribe is used to watch for incoming changes. It is the partner of the Broadcast
 /// trait. The subscriber implements a future trait that is ued to grab an entry
 /// from the broadcast of another node.
-pub trait Subscriber<T: Key, D: Data> {
+pub trait Subscribe<T: Key, D: Data> {
     fn watch(&mut self) -> impl Future<Output = Entry<T, D>>;
 }
 
@@ -31,6 +42,39 @@ pub struct Config<T: Key, D: Data, B: Broadcast<T, D>> {
     ledger: Arc<Mutex<Ledger<T, D>>>,
     broadcast: Arc<Mutex<B>>,
     drop: Arc<Mutex<bool>>,
+}
+
+impl<
+        T: Key + Serialize + DeserializeOwned,
+        D: Data + Serialize + DeserializeOwned,
+        Tr: Transport,
+    > Config<T, D, Broadcaster<Tr>>
+{
+    pub async fn new_with_memberlist(
+        transport_options: Tr::Options,
+        opts: ::memberlist::Options,
+    ) -> Result<
+        Config<T, D, Broadcaster<Tr>>,
+        ::memberlist::error::Error<
+            Tr,
+            HermanDelegate<Tr::Id, <Tr::Resolver as AddressResolver>::ResolvedAddress>,
+        >,
+    > {
+        // TODO: we need to make the channel size and the number of friends configurable
+        let (tx, rx) = mpsc::channel(100);
+        let delegate = HermanDelegate::with_messages(tx);
+        let subscriber = Subscriber::new(rx);
+        let memberlist = Memberlist::with_delegate(delegate, transport_options, opts).await?;
+        let broadcast = Broadcaster::new(memberlist, 3);
+
+        // TODO start the threads
+
+        Ok(Self {
+            ledger: Arc::new(Mutex::new(Ledger::new())),
+            broadcast: Arc::new(Mutex::new(broadcast)),
+            drop: Arc::new(Mutex::new(false)),
+        })
+    }
 }
 
 impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
@@ -43,7 +87,7 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
         }
     }
 
-    pub fn broadcast_listener<S: Subscriber<T, D>>(
+    pub fn broadcast_listener<S: Subscribe<T, D>>(
         &self,
         subscriber: S,
     ) -> BroadcastListener<T, D, B, S> {
@@ -85,7 +129,7 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Drop for Config<T, D, B> {
     }
 }
 
-pub struct BroadcastListener<T: Key, D: Data, B: Broadcast<T, D>, S: Subscriber<T, D>> {
+pub struct BroadcastListener<T: Key, D: Data, B: Broadcast<T, D>, S: Subscribe<T, D>> {
     ledger: Arc<Mutex<Ledger<T, D>>>,
     broadcast: Arc<Mutex<B>>,
     drop: Arc<Mutex<bool>>,
@@ -93,7 +137,7 @@ pub struct BroadcastListener<T: Key, D: Data, B: Broadcast<T, D>, S: Subscriber<
 }
 
 // TODO: We need to add a way to stop the listener
-impl<T: Key, D: Data, B: Broadcast<T, D>, S: Subscriber<T, D>> BroadcastListener<T, D, B, S> {
+impl<T: Key, D: Data, B: Broadcast<T, D>, S: Subscribe<T, D>> BroadcastListener<T, D, B, S> {
     pub async fn run(&mut self) {
         loop {
             let entry = self.subscriber.watch().await;
@@ -116,9 +160,8 @@ mod tests {
     }
 
     impl<T: Key, D: Data> Broadcast<T, D> for TestBroadcast<T, D> {
-        fn send_entry(&mut self, entry: &Entry<T, D>) -> impl Future<Output = ()> {
+        async fn send_entry(&mut self, entry: &Entry<T, D>) {
             let _ = self.tx.send(entry.clone());
-            async {}
         }
     }
 
@@ -126,9 +169,9 @@ mod tests {
         rx: broadcast::Receiver<Entry<T, D>>,
     }
 
-    impl<T: Key, D: Data> Subscriber<T, D> for TestSubscriber<T, D> {
-        fn watch(&mut self) -> impl Future<Output = Entry<T, D>> {
-            async { self.rx.recv().await.unwrap() }
+    impl<T: Key, D: Data> Subscribe<T, D> for TestSubscriber<T, D> {
+        async fn watch(&mut self) -> Entry<T, D> {
+            self.rx.recv().await.unwrap()
         }
     }
 
