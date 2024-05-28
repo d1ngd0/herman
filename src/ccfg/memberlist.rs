@@ -15,12 +15,74 @@ use memberlist::{
     CheapClone, Memberlist,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+
+use crate::Config;
 
 use super::{
     ledger::{Data, Entry, Key},
     Broadcast, Subscribe,
 };
+
+pub trait WithHermanDelegate<
+    T: Transport,
+    K: Key + DeserializeOwned + Serialize,
+    D: Data + DeserializeOwned + Serialize,
+>
+{
+    fn with_config(
+        transport_options: T::Options,
+        opts: memberlist::Options,
+    ) -> impl Future<
+        Output = Result<
+            (
+                Arc<
+                    Memberlist<
+                        T,
+                        HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+                    >,
+                >,
+                Config<K, D, Broadcaster<T>>,
+            ),
+            memberlist::error::Error<
+                T,
+                HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+            >,
+        >,
+    >;
+}
+
+impl<
+        T: Transport,
+        K: Key + DeserializeOwned + Serialize,
+        D: Data + DeserializeOwned + Serialize,
+    > WithHermanDelegate<T, K, D>
+    for Memberlist<T, HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+{
+    async fn with_config(
+        transport_options: T::Options,
+        opts: memberlist::Options,
+    ) -> Result<
+        (Arc<Self>, Config<K, D, Broadcaster<T>>),
+        memberlist::error::Error<
+            T,
+            HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+        >,
+    > {
+        let (tx, rx) = mpsc::channel(100);
+        let delegate = HermanDelegate::with_messages(tx);
+        let mbrlist = Arc::new(Memberlist::with_delegate(delegate, transport_options, opts).await?);
+
+        let cfg = Config::new(Broadcaster::new(mbrlist.clone(), 3));
+
+        let mut broadcast_listener = cfg.broadcast_listener(Subscriber::new(rx));
+        tokio::spawn(async move {
+            broadcast_listener.run().await;
+        });
+
+        Ok((mbrlist, cfg))
+    }
+}
 
 /// The broadcaster implements transporting data using memberlists send_reliable mode. It
 /// grabs all of the online_members when called, and sends the entry to the next num_friends
@@ -34,16 +96,16 @@ use super::{
 ///
 /// So I guess use with caution.
 pub struct Broadcaster<T: Transport> {
-    memberlist:
+    memberlist: Arc<
         Memberlist<T, HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    >,
     num_friends: usize,
 }
 
-impl<T: Transport> Broadcaster<T> {
+impl<'a, T: Transport> Broadcaster<T> {
     pub fn new(
-        memberlist: Memberlist<
-            T,
-            HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+        memberlist: Arc<
+            Memberlist<T, HermanDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
         >,
         num_friends: usize,
     ) -> Self {
@@ -121,10 +183,6 @@ impl<T: Transport, K: Key + Serialize, D: Data + Serialize> Broadcast<K, D> for 
             }
         }
     }
-}
-
-pub trait WithCCFG<T: Transport> {
-    fn with_ccfg<T: Transport>() -> Broadcaster<T>;
 }
 
 pub struct Subscriber {
@@ -280,11 +338,17 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for HermanDeleg
     type Id = I;
     type Address = A;
 
-    async fn notify_join(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+    async fn notify_join(&self, node: Arc<NodeState<Self::Id, Self::Address>>) {
+        log::info!("{} joined", node.id);
+    }
 
-    async fn notify_leave(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+    async fn notify_leave(&self, node: Arc<NodeState<Self::Id, Self::Address>>) {
+        log::info!("{} left", node.id);
+    }
 
-    async fn notify_update(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+    async fn notify_update(&self, node: Arc<NodeState<Self::Id, Self::Address>>) {
+        log::info!("{} updated", node.id);
+    }
 }
 
 impl<K: Id, A: CheapClone + Send + Sync + 'static> Delegate for HermanDelegate<K, A> {

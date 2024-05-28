@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 arrayvec = "0.7.4"
 dapt = "0.1.2"
+log = "0.4.21"
 memberlist = "0.2.1"
 metrics = "0.22.3"
 serde = "1.0.202"

@@ -3,21 +3,13 @@ mod memberlist;
 
 use std::{future::Future, sync::Arc};
 
-use ::memberlist::{
-    delegate::Delegate,
-    net::{AddressResolver, Transport},
-    transport, Memberlist,
-};
 use ledger::Ledger;
-use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::Mutex;
 
-use self::{
-    ledger::{Data, Entry, Key},
-    memberlist::{Broadcaster, Subscriber},
-};
+use self::ledger::{Data, Entry, Key};
 
-pub use self::memberlist::{Broadcast, HermanDelegate, Subscribe};
+pub use memberlist::HermanDelegate;
+pub use memberlist::WithHermanDelegate;
 
 /// Broadcase is used to send data to multiple nodes on the network. It is up to
 /// the implementor how this should be done. send_entry is used to send a single entry
@@ -42,39 +34,6 @@ pub struct Config<T: Key, D: Data, B: Broadcast<T, D>> {
     ledger: Arc<Mutex<Ledger<T, D>>>,
     broadcast: Arc<Mutex<B>>,
     drop: Arc<Mutex<bool>>,
-}
-
-impl<
-        T: Key + Serialize + DeserializeOwned,
-        D: Data + Serialize + DeserializeOwned,
-        Tr: Transport,
-    > Config<T, D, Broadcaster<Tr>>
-{
-    pub async fn new_with_memberlist(
-        transport_options: Tr::Options,
-        opts: ::memberlist::Options,
-    ) -> Result<
-        Config<T, D, Broadcaster<Tr>>,
-        ::memberlist::error::Error<
-            Tr,
-            HermanDelegate<Tr::Id, <Tr::Resolver as AddressResolver>::ResolvedAddress>,
-        >,
-    > {
-        // TODO: we need to make the channel size and the number of friends configurable
-        let (tx, rx) = mpsc::channel(100);
-        let delegate = HermanDelegate::with_messages(tx);
-        let subscriber = Subscriber::new(rx);
-        let memberlist = Memberlist::with_delegate(delegate, transport_options, opts).await?;
-        let broadcast = Broadcaster::new(memberlist, 3);
-
-        // TODO start the threads
-
-        Ok(Self {
-            ledger: Arc::new(Mutex::new(Ledger::new())),
-            broadcast: Arc::new(Mutex::new(broadcast)),
-            drop: Arc::new(Mutex::new(false)),
-        })
-    }
 }
 
 impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {

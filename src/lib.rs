@@ -1,4 +1,4 @@
-mod ccfg;
+pub mod ccfg;
 mod router;
 
 pub use ccfg::Config;
