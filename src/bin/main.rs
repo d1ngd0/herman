@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use dapt::Dapt;
 use herman::ccfg::{HermanDelegate, WithHermanDelegate};
 use herman::Config;
 use memberlist::agnostic::tokio::TokioRuntime;
@@ -53,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 HermanDelegate<u64, SocketAddr>,
             >,
         >,
-        Config<u64, String, _>,
+        Config<u64, Dapt, _>,
     ) = Memberlist::with_config(transport_options, Options::default())
         .await
         .unwrap();

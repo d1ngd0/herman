@@ -6,6 +6,7 @@ use std::{future::Future, sync::Arc};
 use ledger::Ledger;
 use tokio::sync::Mutex;
 
+use self::ledger::LedgerError;
 use self::ledger::{Data, Entry, Key};
 
 pub use memberlist::HermanDelegate;
@@ -36,6 +37,20 @@ pub struct Config<T: Key, D: Data, B: Broadcast<T, D>> {
     drop: Arc<Mutex<bool>>,
 }
 
+pub enum Error {
+    EntryExists,
+}
+
+type ConfigResult<T> = Result<T, Error>;
+
+impl From<LedgerError> for Error {
+    fn from(e: LedgerError) -> Self {
+        match e {
+            LedgerError::EntryExists => Error::EntryExists,
+        }
+    }
+}
+
 impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
     /// new creates a new Config with the given ledger, broadcast, and subscriber.
     pub fn new(broadcast: B) -> Self {
@@ -58,18 +73,20 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
         }
     }
 
-    pub async fn put(&mut self, key: T, value: D) {
+    pub async fn put(&mut self, key: T, value: D) -> ConfigResult<()> {
         let mut ledger = self.ledger.lock().await;
-        let entry = ledger.put(key, value);
+        let entry = ledger.put(key, value)?;
         self.broadcast.lock().await.send_entry(entry).await;
         ledger.sort();
+        Ok(())
     }
 
-    pub async fn delete(&mut self, key: T) {
+    pub async fn delete(&mut self, key: T) -> ConfigResult<()> {
         let mut ledger = self.ledger.lock().await;
-        let entry = ledger.delete(key);
+        let entry = ledger.delete(key)?;
         self.broadcast.lock().await.send_entry(entry).await;
         ledger.sort();
+        Ok(())
     }
 
     pub async fn get<ET: PartialEq<T>>(&mut self, key: ET) -> Option<D> {
@@ -149,10 +166,10 @@ mod tests {
         });
 
         // create some entries in config
-        config
+        let _ = config
             .put("something".to_string(), "value".to_string())
             .await;
-        config
+        let _ = config
             .put("another_thing".to_string(), "value2".to_string())
             .await;
 
