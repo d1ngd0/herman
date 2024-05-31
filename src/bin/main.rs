@@ -1,5 +1,6 @@
 use std::env;
 use std::hash::{DefaultHasher, Hasher};
+use std::io::{self, BufRead};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,6 +17,11 @@ use memberlist::net::{
 use memberlist::{Memberlist, Options};
 
 use tokio::signal;
+
+const GET: &str = "get";
+const SET: &str = "set";
+const REMOVE: &str = "remove";
+const EXIT: &str = "exit";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         NodeAddress::from_str(bind_address.as_str()).expect("invalid bind address"),
     );
 
-    let (m, _cfg): (
+    let (m, mut cfg): (
         Arc<
             Memberlist<
                 NetTransport<
@@ -54,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 HermanDelegate<u64, SocketAddr>,
             >,
         >,
-        Config<u64, Dapt, _>,
+        Config<String, Dapt, _>,
     ) = Memberlist::with_config(transport_options, Options::default())
         .await
         .unwrap();
@@ -76,9 +82,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     }
 
-    signal::ctrl_c().await.expect("failed to listen for event");
+    let mut stdin = io::stdin().lock().lines();
+    loop {
+        let action = stdin.next().unwrap().unwrap();
+        match action.as_str() {
+            GET => {
+                let key = stdin.next().unwrap().unwrap();
+                match cfg.get(key).await {
+                    Some(value) => println!("{}", serde_json::to_string(&value).unwrap()),
+                    None => println!("null"),
+                };
+            }
+            SET => {
+                let key = stdin.next().unwrap().unwrap();
+                let value = stdin.next().unwrap().unwrap();
+                let value: Dapt = match serde_json::from_str(&value) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        continue;
+                    }
+                };
 
-    println!("{:?}", m.members().await);
+                match cfg.put(key, value).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("error: {}", e),
+                };
+            }
+            EXIT => break,
+            REMOVE => {
+                let key = stdin.next().unwrap().unwrap();
+                match cfg.delete(key).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("error: {}", e),
+                };
+            }
+            _ => {
+                eprintln!("unknown action: {}", action);
+            }
+        }
+    }
 
     Ok(())
 }

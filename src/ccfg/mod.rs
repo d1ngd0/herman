@@ -1,13 +1,15 @@
 mod ledger;
 mod memberlist;
+mod state_engine;
 
+use std::fmt::{self, Display, Formatter};
 use std::{future::Future, sync::Arc};
 
 use ledger::Ledger;
 use tokio::sync::Mutex;
 
-use self::ledger::LedgerError;
 use self::ledger::{Data, Entry, Key};
+use self::ledger::{EventListener, LedgerError, NoopEventListener};
 
 pub use memberlist::HermanDelegate;
 pub use memberlist::WithHermanDelegate;
@@ -31,14 +33,28 @@ pub trait Subscribe<T: Key, D: Data> {
 
 /// Config holds the config data, and handles the broadcast and subscribers for the
 /// ledger.
-pub struct Config<T: Key, D: Data, B: Broadcast<T, D>> {
-    ledger: Arc<Mutex<Ledger<T, D>>>,
+pub struct Config<
+    T: Key,
+    D: Data,
+    B: Broadcast<T, D>,
+    Events: EventListener<T, D> = NoopEventListener,
+> {
+    ledger: Arc<Mutex<Ledger<T, D, Events>>>,
     broadcast: Arc<Mutex<B>>,
     drop: Arc<Mutex<bool>>,
 }
 
+#[derive(Debug)]
 pub enum Error {
     EntryExists,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Error::EntryExists => write!(f, "entry exists"),
+        }
+    }
 }
 
 type ConfigResult<T> = Result<T, Error>;
@@ -60,11 +76,23 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
             drop: Arc::new(Mutex::new(false)),
         }
     }
+}
+
+impl<T: Key, D: Data, B: Broadcast<T, D>, E: EventListener<T, D>> Config<T, D, B, E> {
+    /// new creates a new Config with the given ledger, broadcast, and subscriber.
+    /// new creates a new Config with the given ledger, broadcast, and subscriber.
+    pub fn new_with_events(broadcast: B, events: E) -> Self {
+        Self {
+            ledger: Arc::new(Mutex::new(Ledger::new_with_listener(events))),
+            broadcast: Arc::new(Mutex::new(broadcast)),
+            drop: Arc::new(Mutex::new(false)),
+        }
+    }
 
     pub fn broadcast_listener<S: Subscribe<T, D>>(
         &self,
         subscriber: S,
-    ) -> BroadcastListener<T, D, B, S> {
+    ) -> BroadcastListener<T, D, B, S, E> {
         BroadcastListener {
             ledger: self.ledger.clone(),
             broadcast: self.broadcast.clone(),
@@ -95,7 +123,7 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Config<T, D, B> {
     }
 }
 
-impl<T: Key, D: Data, B: Broadcast<T, D>> Drop for Config<T, D, B> {
+impl<T: Key, D: Data, B: Broadcast<T, D>, E: EventListener<T, D>> Drop for Config<T, D, B, E> {
     fn drop(&mut self) {
         let drop = self.drop.clone();
         tokio::spawn(async move {
@@ -105,15 +133,23 @@ impl<T: Key, D: Data, B: Broadcast<T, D>> Drop for Config<T, D, B> {
     }
 }
 
-pub struct BroadcastListener<T: Key, D: Data, B: Broadcast<T, D>, S: Subscribe<T, D>> {
-    ledger: Arc<Mutex<Ledger<T, D>>>,
+pub struct BroadcastListener<
+    T: Key,
+    D: Data,
+    B: Broadcast<T, D>,
+    S: Subscribe<T, D>,
+    E: EventListener<T, D> = NoopEventListener,
+> {
+    ledger: Arc<Mutex<Ledger<T, D, E>>>,
     broadcast: Arc<Mutex<B>>,
     drop: Arc<Mutex<bool>>,
     subscriber: S,
 }
 
 // TODO: We need to add a way to stop the listener
-impl<T: Key, D: Data, B: Broadcast<T, D>, S: Subscribe<T, D>> BroadcastListener<T, D, B, S> {
+impl<T: Key, D: Data, B: Broadcast<T, D>, S: Subscribe<T, D>, E: EventListener<T, D>>
+    BroadcastListener<T, D, B, S, E>
+{
     pub async fn run(&mut self) {
         loop {
             let entry = self.subscriber.watch().await;
